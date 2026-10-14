@@ -168,7 +168,7 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
     }
 
     #[inline]
-    pub fn get<Q: ?Sized>(&mut self, k: &Q) -> Option<&V>
+    pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
     where
         Q: Hash + Equivalent<K>,
     {
@@ -251,6 +251,19 @@ mod tests {
     use crate::SurMap;
     use std::collections::BTreeMap;
     use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+
+    #[test]
+    fn get_supports_shared_references_and_borrowed_keys() {
+        let mut map = SurMap::new();
+        map.insert(String::from("alice"), 1);
+        map.insert(String::from("bob"), 2);
+
+        let shared = &map;
+        let alice = shared.get("alice").unwrap();
+        let bob = shared.get("bob").unwrap();
+        assert_eq!((*alice, *bob), (1, 2));
+        assert_eq!(shared.get("missing"), None);
+    }
 
     #[test]
     fn replacing_keys_updates_value_groups() {
