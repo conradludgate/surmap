@@ -67,14 +67,8 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
                     return Some(std::mem::replace(&mut entry.pair.1, new_entry.pair.1));
                 }
 
-                let old_entry = std::mem::replace(entry, new_entry);
-                // fix pointers
-                if let Some(prev) = self.entries.get_mut(old_entry.ptrs.0) {
-                    prev.ptrs.1 = old_entry.ptrs.1;
-                }
-                if let Some(next) = self.entries.get_mut(old_entry.ptrs.1) {
-                    next.ptrs.0 = old_entry.ptrs.0;
-                }
+                self.unlink_value(index);
+                let old_entry = std::mem::replace(&mut self.entries[index], new_entry);
                 result = Some(old_entry.pair.1);
             }
             Err(slot) => {
@@ -99,6 +93,8 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
                 // SAFETY:
                 // we know this pointer is valid as the table found this slot for us
                 self.entries[index].ptrs.1 = unsafe { std::mem::replace(bucket.as_mut(), index) };
+                let next = self.entries[index].ptrs.1;
+                self.entries[next].ptrs.0 = index;
             }
             Err(slot) => {
                 // SAFETY:
@@ -109,6 +105,24 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         }
 
         result
+    }
+
+    // Detach an entry while its value and all entry indexes are still valid.
+    fn unlink_value(&mut self, index: usize) {
+        let (prev, next) = self.entries[index].ptrs;
+        if prev == usize::MAX {
+            let hash = make_hash(&self.hash_builder, &self.entries[index].pair.1);
+            if next == usize::MAX {
+                self.values.remove_entry(hash, |&i| i == index);
+            } else {
+                *self.values.get_mut(hash, |&i| i == index).unwrap() = next;
+            }
+        } else {
+            self.entries[prev].ptrs.1 = next;
+        }
+        if next != usize::MAX {
+            self.entries[next].ptrs.0 = prev;
+        }
     }
 
     pub fn remove<Q: ?Sized>(&mut self, k: &Q) -> Option<V>
@@ -131,13 +145,24 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         let index = self
             .keys
             .remove_entry(hash, |&i| k.equivalent(&self.entries[i].pair.0))?;
+        self.unlink_value(index);
         let entry = self.entries.swap_remove(index);
 
         if index < self.entries.len() {
+            let old_index = self.entries.len();
+            let key_hash = make_hash(&self.hash_builder, &self.entries[index].pair.0);
+            *self.keys.get_mut(key_hash, |&i| i == old_index).unwrap() = index;
+
             let (prev, next) = self.entries[index].ptrs;
 
-            if let Some(prev) = self.entries.get_mut(prev) {
-                prev.ptrs.1 = index;
+            if prev == usize::MAX {
+                let value_hash = make_hash(&self.hash_builder, &self.entries[index].pair.1);
+                *self
+                    .values
+                    .get_mut(value_hash, |&i| i == old_index)
+                    .unwrap() = index;
+            } else {
+                self.entries[prev].ptrs.1 = index;
             }
             if let Some(next) = self.entries.get_mut(next) {
                 next.ptrs.0 = index;
@@ -229,6 +254,100 @@ struct Entry<K, V> {
 #[cfg(test)]
 mod tests {
     use crate::SurMap;
+    use std::collections::BTreeMap;
+    use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+
+    #[test]
+    fn replacing_keys_updates_value_groups() {
+        let mut map = SurMap::new();
+        map.insert("a", 1);
+        map.insert("b", 1);
+        map.insert("c", 1);
+        assert_eq!(map.insert("b", 2), Some(1));
+        assert_eq!(map.get_keys(&1).copied().collect::<Vec<_>>(), ["c", "a"]);
+        assert_eq!(map.insert("c", 2), Some(1));
+        assert_eq!(map.get_keys(&1).copied().collect::<Vec<_>>(), ["a"]);
+        assert_eq!(map.get_keys(&2).copied().collect::<Vec<_>>(), ["c", "b"]);
+        assert_eq!(map.insert("a", 2), Some(1));
+        assert_eq!(map.get_keys(&1).next(), None);
+        assert_eq!(map.insert("c", 2), Some(2));
+        assert_eq!(
+            map.get_keys(&2).copied().collect::<Vec<_>>(),
+            ["a", "c", "b"]
+        );
+        assert_eq!(map.remove_entry("c"), Some(("c", 2)));
+        assert_eq!(map.get_keys(&2).copied().collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(map.remove("a"), Some(2));
+        assert_eq!(map.remove("b"), Some(2));
+        assert_eq!(map.get_keys(&2).next(), None);
+        assert_eq!(map.remove("missing"), None);
+        assert_eq!(map.insert("d", 2), None);
+        assert_eq!(map.get_keys(&2).copied().collect::<Vec<_>>(), ["d"]);
+    }
+
+    #[derive(Default)]
+    struct ConstantHasher;
+
+    impl Hasher for ConstantHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, _: &[u8]) {}
+    }
+
+    fn check_mixed_operations<S: BuildHasher + Default>() {
+        let mut map = SurMap::<u32, u32, S>::default();
+        let mut expected = BTreeMap::new();
+        let mut groups = vec![Vec::new(); 8];
+        let mut state = 42_u64;
+        for _ in 0..2000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let key = ((state >> 32) % 32) as u32;
+            let value = ((state >> 40) % 8) as u32;
+            if state & 3 == 0 {
+                let old = expected.remove(&key);
+                assert_eq!(map.remove_entry(&key), old.map(|v| (key, v)));
+                if let Some(old) = old {
+                    groups[old as usize].retain(|&k| k != key);
+                }
+            } else {
+                let old = expected.insert(key, value);
+                assert_eq!(map.insert(key, value), old);
+                if old != Some(value) {
+                    if let Some(old) = old {
+                        groups[old as usize].retain(|&k| k != key);
+                    }
+                    groups[value as usize].insert(0, key);
+                }
+            }
+
+            assert_eq!(map.entries.len(), expected.len());
+            assert_eq!(map.keys.len(), expected.len());
+            assert_eq!(
+                map.values.len(),
+                groups.iter().filter(|g| !g.is_empty()).count()
+            );
+            for key in 0..32 {
+                assert_eq!(map.get(&key).copied(), expected.get(&key).copied());
+            }
+            for value in 0..8 {
+                // Bound iteration so an accidental linked-list cycle fails promptly.
+                let keys: Vec<_> = map.get_keys(&value).take(33).copied().collect();
+                assert_eq!(keys, groups[value as usize]);
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_operations_match_reference_map() {
+        check_mixed_operations::<hashbrown::hash_map::DefaultHashBuilder>();
+    }
+
+    #[test]
+    fn mixed_operations_with_hash_collisions_match_reference_map() {
+        check_mixed_operations::<BuildHasherDefault<ConstantHasher>>();
+    }
 
     #[test]
     fn it_works() {
