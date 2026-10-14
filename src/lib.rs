@@ -1,7 +1,9 @@
+#![forbid(unsafe_code)]
+
 use std::hash::{BuildHasher, Hash};
 
 pub use hashbrown::Equivalent;
-use hashbrown::{hash_map::DefaultHashBuilder, raw::RawTable};
+use hashbrown::{hash_table::Entry as TableEntry, DefaultHashBuilder, HashTable};
 
 /// A Surjective HashMap.
 ///
@@ -11,9 +13,9 @@ pub struct SurMap<K, V, S = DefaultHashBuilder> {
     hash_builder: S,
     entries: Vec<Entry<K, V>>,
     // points to the entry that contains this key
-    keys: RawTable<usize>,
+    keys: HashTable<usize>,
     // points to the first entry that contains this value
-    values: RawTable<usize>,
+    values: HashTable<usize>,
 }
 
 impl<K, V, S: Default> Default for SurMap<K, V, S> {
@@ -21,8 +23,8 @@ impl<K, V, S: Default> Default for SurMap<K, V, S> {
         SurMap {
             hash_builder: S::default(),
             entries: Vec::new(),
-            keys: RawTable::new(),
-            values: RawTable::new(),
+            keys: HashTable::new(),
+            values: HashTable::new(),
         }
     }
 }
@@ -45,22 +47,17 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
             ptrs: (usize::MAX, usize::MAX),
         };
 
-        let result;
-
         let key_hasher =
             |&key_idx: &usize| make_hash::<K, S>(&self.hash_builder, &self.entries[key_idx].pair.0);
-        match self.keys.find_or_find_insert_slot(
+        let result = match self.keys.entry(
             key_hash,
             |&key_idx| self.entries[key_idx].pair.0 == new_entry.pair.0,
             key_hasher,
         ) {
-            Ok(bucket) => {
-                // SAFETY:
-                // we know this pointer is valid as the table found this slot for us
-                index = unsafe { *bucket.as_ref() };
+            TableEntry::Occupied(entry) => {
+                index = *entry.get();
 
-                // table index always points inside the entries
-                let entry = unsafe { self.entries.get_unchecked_mut(index) };
+                let entry = &mut self.entries[index];
 
                 // optimisation
                 if new_entry.pair.1 == entry.pair.1 {
@@ -69,38 +66,30 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
 
                 self.unlink_value(index);
                 let old_entry = std::mem::replace(&mut self.entries[index], new_entry);
-                result = Some(old_entry.pair.1);
+                Some(old_entry.pair.1)
             }
-            Err(slot) => {
-                // SAFETY:
-                // slot must point to a slot previously returned by find_or_find_insert_slot
-                // and no mutation of the table must have occurred since that call.
-                unsafe { self.keys.insert_in_slot(key_hash, slot, index) };
+            TableEntry::Vacant(entry) => {
+                entry.insert(index);
                 self.entries.push(new_entry);
-                result = None;
+                None
             }
-        }
+        };
 
         let value_hasher =
             |&val_idx: &usize| make_hash::<V, S>(&self.hash_builder, &self.entries[val_idx].pair.1);
-        match self.values.find_or_find_insert_slot(
+        match self.values.entry(
             value_hash,
             |&val_idx| self.entries[val_idx].pair.1 == self.entries[index].pair.1,
             value_hasher,
         ) {
             // this value is known. add it to the linked list
-            Ok(bucket) => {
-                // SAFETY:
-                // we know this pointer is valid as the table found this slot for us
-                self.entries[index].ptrs.1 = unsafe { std::mem::replace(bucket.as_mut(), index) };
+            TableEntry::Occupied(entry) => {
+                self.entries[index].ptrs.1 = std::mem::replace(entry.into_mut(), index);
                 let next = self.entries[index].ptrs.1;
                 self.entries[next].ptrs.0 = index;
             }
-            Err(slot) => {
-                // SAFETY:
-                // slot must point to a slot previously returned by find_or_find_insert_slot
-                // and no mutation of the table must have occurred since that call.
-                unsafe { self.values.insert_in_slot(value_hash, slot, index) };
+            TableEntry::Vacant(entry) => {
+                entry.insert(index);
             }
         }
 
@@ -113,9 +102,12 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         if prev == usize::MAX {
             let hash = make_hash(&self.hash_builder, &self.entries[index].pair.1);
             if next == usize::MAX {
-                self.values.remove_entry(hash, |&i| i == index);
+                self.values
+                    .find_entry(hash, |&i| i == index)
+                    .unwrap()
+                    .remove();
             } else {
-                *self.values.get_mut(hash, |&i| i == index).unwrap() = next;
+                *self.values.find_mut(hash, |&i| i == index).unwrap() = next;
             }
         } else {
             self.entries[prev].ptrs.1 = next;
@@ -144,14 +136,17 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         let hash = make_hash::<Q, S>(&self.hash_builder, k);
         let index = self
             .keys
-            .remove_entry(hash, |&i| k.equivalent(&self.entries[i].pair.0))?;
+            .find_entry(hash, |&i| k.equivalent(&self.entries[i].pair.0))
+            .ok()?
+            .remove()
+            .0;
         self.unlink_value(index);
         let entry = self.entries.swap_remove(index);
 
         if index < self.entries.len() {
             let old_index = self.entries.len();
             let key_hash = make_hash(&self.hash_builder, &self.entries[index].pair.0);
-            *self.keys.get_mut(key_hash, |&i| i == old_index).unwrap() = index;
+            *self.keys.find_mut(key_hash, |&i| i == old_index).unwrap() = index;
 
             let (prev, next) = self.entries[index].ptrs;
 
@@ -159,7 +154,7 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
                 let value_hash = make_hash(&self.hash_builder, &self.entries[index].pair.1);
                 *self
                     .values
-                    .get_mut(value_hash, |&i| i == old_index)
+                    .find_mut(value_hash, |&i| i == old_index)
                     .unwrap() = index;
             } else {
                 self.entries[prev].ptrs.1 = index;
@@ -196,7 +191,7 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
             let hash = make_hash::<Q, S>(&self.hash_builder, k);
             let index = self
                 .keys
-                .get(hash, |&i| k.equivalent(&self.entries[i].pair.0))?;
+                .find(hash, |&i| k.equivalent(&self.entries[i].pair.0))?;
             let entry = &self.entries[*index];
             Some(&entry.pair)
         }
@@ -212,7 +207,7 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         } else {
             let hash = make_hash::<Q, S>(&self.hash_builder, v);
             self.values
-                .get(hash, |&i| v.equivalent(&self.entries[i].pair.1))
+                .find(hash, |&i| v.equivalent(&self.entries[i].pair.1))
                 .copied()
                 .unwrap_or(usize::MAX)
         };
@@ -341,7 +336,7 @@ mod tests {
 
     #[test]
     fn mixed_operations_match_reference_map() {
-        check_mixed_operations::<hashbrown::hash_map::DefaultHashBuilder>();
+        check_mixed_operations::<hashbrown::DefaultHashBuilder>();
     }
 
     #[test]
