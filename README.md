@@ -159,6 +159,12 @@ Insertion removes any mapping with a conflicting key or value before adding the
 new pair. Removal uses `swap_remove` and updates both indexes for the moved pair;
 there are no group links to repair.
 
+Insertion resolves matches and computes the hashes needed for removal and growth
+before changing mappings. Rehashing uses temporary cached hashes, so a panic in
+`Hash`, `Eq`, or the hash builder leaves mappings and value-group order unchanged.
+Capacity may increase during preparation. Hash buffers are temporary during
+rehashing; entries do not store persistent hash caches.
+
 ## Performance
 
 | Operation | Expected cost | Worst-case cost |

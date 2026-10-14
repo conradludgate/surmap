@@ -121,31 +121,63 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> BiMap<K, V, S> {
         self.value_index(value).is_some()
     }
 
-    fn insert_unique(&mut self, key: K, value: V) {
-        let (_, previous) = self.table.insert_entry((key, value));
-        debug_assert!(previous.is_none());
-    }
-
     fn remove_index(&mut self, index: usize) -> (K, V) {
-        self.table.detach_value_head(index, None);
-        self.table.remove_entry(index)
+        let mut prepared = self.table.prepare_removals(&[index]);
+        self.table
+            .detach_value_head(index, None, prepared.value_hash(index));
+        self.table.remove_prepared(index, &mut prepared)
     }
 
     /// Replaces mappings with the same key or value, returning both displaced pairs.
+    /// On a hash/equality panic, mappings are unchanged.
     pub fn insert(&mut self, key: K, value: V) -> InsertResult<K, V> {
-        let by_key = self.remove_entry(&key);
-        let by_value = self.value_index(&value).map(|i| self.remove_index(i));
-        self.insert_unique(key, value);
+        let pair = (key, value);
+        let mut prepared = self.table.prepare_insert(&pair);
+        let mut conflicts = [0; 2];
+        let mut count = 0;
+        if let Some(index) = prepared.key_index {
+            conflicts[count] = index;
+            count += 1;
+        }
+        if let Some(index) = prepared.value_index {
+            if Some(index) != prepared.key_index {
+                conflicts[count] = index;
+                count += 1;
+            }
+        }
+        let mut removals = self.table.prepare_removals(&conflicts[..count]);
+        let by_key = prepared.key_index.map(|index| {
+            let last = self.len() - 1;
+            self.table
+                .detach_value_head(index, None, removals.value_hash(index));
+            let pair = self.table.remove_prepared(index, &mut removals);
+            if prepared.value_index == Some(index) {
+                prepared.value_index = None;
+            } else if prepared.value_index == Some(last) {
+                prepared.value_index = Some(index);
+            }
+            pair
+        });
+        let by_value = prepared.value_index.map(|index| {
+            self.table
+                .detach_value_head(index, None, removals.value_hash(index));
+            self.table.remove_prepared(index, &mut removals)
+        });
+        prepared.key_index = None;
+        prepared.value_index = None;
+        self.table.insert_prepared(pair, &prepared);
         InsertResult { by_key, by_value }
     }
 
     /// Inserts only if neither the key nor the value exists.
     /// Conflicts return the supplied pair without modifying the map.
     pub fn try_insert(&mut self, key: K, value: V) -> Result<(), (K, V)> {
-        if self.contains_key(&key) || self.contains_value(&value) {
-            return Err((key, value));
+        let pair = (key, value);
+        let prepared = self.table.prepare_insert(&pair);
+        if prepared.key_index.is_some() || prepared.value_index.is_some() {
+            return Err(pair);
         }
-        self.insert_unique(key, value);
+        self.table.insert_prepared(pair, &prepared);
         Ok(())
     }
     pub fn remove<Q: Hash + Equivalent<K> + ?Sized>(&mut self, key: &Q) -> Option<V> {

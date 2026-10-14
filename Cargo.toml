@@ -1,10 +1,15 @@
 [package]
 name = "surmap"
 version = "0.1.0"
+authors = ["Conrad Ludgate <conradludgate@gmail.com>"]
+description = "Surjective and bijective hash maps with efficient lookups in both directions"
+license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.85"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+readme = "README.md"
+repository = "https://github.com/conradludgate/surmap"
+keywords = ["map", "hashmap", "bimap", "surjective", "bidirectional"]
+categories = ["data-structures"]
 
 [dependencies]
 hashbrown = "0.17.1"

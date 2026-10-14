@@ -206,23 +206,26 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         self.table.value_index(value)
     }
 
+    /// Hashing and equality finish before changing mappings or value groups.
+    /// On a hash/equality panic, mappings and group order are unchanged.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let new_entry = Entry::from((key, value));
-        let (index, result, previous) = if let Some(index) = self.table.key_index(&new_entry.pair.0)
-        {
+        let prepared = self.table.prepare_insert(&new_entry.pair);
+        let (index, result) = if let Some(index) = prepared.key_index {
             let entry = self.table.entry_mut(index);
             if entry.pair.1 == new_entry.pair.1 {
                 return Some(std::mem::replace(&mut entry.pair.1, new_entry.pair.1));
             }
-            self.unlink_value(index);
+            let old_hash = self.table.value_hash(index);
+            self.unlink_value(index, old_hash);
             let old = std::mem::replace(self.table.entry_mut(index), new_entry);
-            let previous = self.table.link_value(index);
-            (index, Some(old.pair.1), previous)
+            self.table.link_value_prepared(index, &prepared);
+            (index, Some(old.pair.1))
         } else {
-            let (index, previous) = self.table.insert_entry(new_entry);
-            (index, None, previous)
+            let index = self.table.insert_prepared(new_entry, &prepared);
+            (index, None)
         };
-        if let Some(next) = previous {
+        if let Some(next) = prepared.value_index {
             self.table.entry_mut(index).ptrs.1 = next;
             self.table.entry_mut(next).ptrs.0 = index;
         }
@@ -230,11 +233,11 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
     }
 
     // Detach an entry while its value and all entry indexes are still valid.
-    fn unlink_value(&mut self, index: usize) {
+    fn unlink_value(&mut self, index: usize, value_hash: u64) {
         let (prev, next) = self.table.entries()[index].ptrs;
         if prev == usize::MAX {
             self.table
-                .detach_value_head(index, (next != usize::MAX).then_some(next));
+                .detach_value_head(index, (next != usize::MAX).then_some(next), value_hash);
         } else {
             self.table.entry_mut(prev).ptrs.1 = next;
         }
@@ -264,8 +267,9 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
     }
 
     fn remove_index(&mut self, index: usize) -> (K, V) {
-        self.unlink_value(index);
-        let entry = self.table.remove_entry(index);
+        let mut prepared = self.table.prepare_removals(&[index]);
+        self.unlink_value(index, prepared.value_hash(index));
+        let entry = self.table.remove_prepared(index, &mut prepared);
         if index < self.len() {
             let (prev, next) = self.table.entries()[index].ptrs;
             if prev != usize::MAX {
