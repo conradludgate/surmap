@@ -50,7 +50,7 @@ where
 impl<K: Serialize, V: Serialize, S> Serialize for BiMap<K, V, S> {
     fn serialize<T: Serializer>(&self, serializer: T) -> Result<T::Ok, T::Error> {
         let mut map = serializer.serialize_map(Some(self.len()))?;
-        for (key, value) in self.iter() {
+        for (key, value) in self {
             map.serialize_entry(key, value)?;
         }
         map.end()

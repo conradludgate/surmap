@@ -70,3 +70,15 @@ fn deserialization_supports_borrowed_keys_and_values() {
     let map: BiMap<&str, &str> = serde_json::from_str(json).unwrap();
     assert_eq!(map.get_key("design"), Some(&"bob"));
 }
+
+#[test]
+fn invalid_input_reports_the_expected_map_shape() {
+    for input in ["[]", "42", "null", "true"] {
+        let error = serde_json::from_str::<SurMap<String, u32>>(input).unwrap_err();
+        assert!(error.to_string().contains("a map of keys to values"));
+        let error = serde_json::from_str::<BiMap<String, u32>>(input).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("a map with unique keys and unique values"));
+    }
+}

@@ -1,7 +1,9 @@
 /// Reservation can fail in either the entry vector or a hash index.
 #[derive(Debug)]
 pub enum TryReserveError {
+    /// The entry vector or a temporary rehash buffer could not reserve memory.
     Entries(std::collections::TryReserveError),
+    /// A key or value hash index could not reserve memory.
     Index(hashbrown::TryReserveError),
 }
 

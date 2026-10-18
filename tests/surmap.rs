@@ -83,7 +83,7 @@ fn collection_iteration_clone_and_equality() {
     assert!(other.contains_key(&4));
     assert!(other.contains_value(&11));
     assert!(!other.contains_value(&99));
-    assert!(!format!("{other:?}").is_empty());
+    assert_ne!(format!("{other:?}"), "");
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn retain_and_drain_preserve_indexes_even_when_interrupted() {
     assert_eq!(map.len(), 15);
     for value in 0..3 {
         let mut actual = map.get_keys(&value).copied().collect::<Vec<_>>();
-        actual.sort();
+        actual.sort_unstable();
         assert_eq!(
             actual,
             (0..30)
@@ -105,11 +105,9 @@ fn retain_and_drain_preserve_indexes_even_when_interrupted() {
     let result = catch_unwind(AssertUnwindSafe(|| {
         map.retain(|_, _| {
             calls += 1;
-            if calls == 4 {
-                panic!("predicate failed");
-            }
+            assert!(calls != 4, "predicate failed");
             false
-        })
+        });
     }));
     assert!(result.is_err());
     assert_eq!(map.len(), 12);
@@ -153,11 +151,11 @@ fn surmap_capacity_operations_preserve_group_order_with_collisions() {
     for value in 0..7 {
         assert_eq!(
             map.get_keys(&value).copied().collect::<Vec<_>>(),
-            groups[value as usize]
+            groups[usize::try_from(value).unwrap()]
         );
     }
     let mut values = map.distinct_values().copied().collect::<Vec<_>>();
-    values.sort();
+    values.sort_unstable();
     assert_eq!(values, (0..7).collect::<Vec<_>>());
     let mut iter = map.get_keys(&6);
     assert_eq!(iter.clone().copied().collect::<Vec<_>>(), groups[6]);
@@ -213,10 +211,12 @@ fn check_mixed_operations<S: BuildHasher + Default>() {
     let mut groups = vec![Vec::new(); 8];
     let mut state = 42_u64;
     for _ in 0..2000 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let key = ((state >> 32) % 32) as u32;
         let value = ((state >> 40) % 8) as u32;
-        if state & 3 == 0 {
+        if state.trailing_zeros() >= 2 {
             let old = expected.remove(&key);
             assert_eq!(map.remove_entry(&key), old.map(|v| (key, v)));
             if let Some(old) = old {

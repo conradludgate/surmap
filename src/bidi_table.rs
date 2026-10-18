@@ -2,7 +2,7 @@ use crate::{Equivalent, TryReserveError};
 use hashbrown::HashTable;
 use std::hash::{BuildHasher, Hash};
 
-/// Entry layout is chosen by the map: linked entries for SurMap, pairs for BiMap.
+/// Entry layout is chosen by the map: linked entries for `SurMap`, pairs for `BiMap`.
 pub(crate) trait TableEntry {
     type Key;
     type Value;
@@ -217,7 +217,7 @@ where
             keys.try_reserve_exact(self.len())
                 .map_err(TryReserveError::Entries)?;
             keys.resize(self.len(), 0);
-            for &i in self.keys.iter() {
+            for &i in &self.keys {
                 keys[i] = self.hash_builder.hash_one(&self.entries[i].pair().0);
             }
         }
@@ -226,7 +226,7 @@ where
                 .try_reserve_exact(self.len())
                 .map_err(TryReserveError::Entries)?;
             values.resize(self.len(), 0);
-            for &i in self.values.iter() {
+            for &i in &self.values {
                 values[i] = self.hash_builder.hash_one(&self.entries[i].pair().1);
             }
         }
@@ -318,7 +318,7 @@ where
     }
 
     /// Group detachment happens before this commit. All user hashing was done
-    /// in prepare_removals; this repairs indexes using only integer comparisons.
+    /// in `prepare_removals`; this repairs indexes using only integer comparisons.
     pub(crate) fn remove_prepared(&mut self, index: usize, prepared: &mut PreparedRemovals) -> E {
         let key_hash = prepared.pair(index).key;
         let last = self.entries.len() - 1;

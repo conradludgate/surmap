@@ -158,7 +158,7 @@ fn surmap_insert_panics_leave_mappings_and_group_order_unchanged() {
                 } else {
                     reached_success = true;
                 }
-                for (k, v) in map.iter() {
+                for (k, v) in &map {
                     assert_eq!(map.get(&k.id).map(|v| v.id), Some(v.id));
                     assert!(map
                         .get_keys(&v.id)
@@ -246,3 +246,80 @@ fn bimap_insert_and_try_insert_panics_leave_both_indexes_and_mappings_unchanged(
         }
     }
 }
+
+// Exercise every user callback position during capacity changes, not just growth
+// triggered by insertion. The map has moved entries and several value groups.
+macro_rules! capacity_panics {
+    ($test:ident, $map:ident, $value:expr, $check_reverse:expr) => {
+        #[test]
+        fn $test() {
+            for operation in ["reserve", "try_reserve", "shrink"] {
+                for kind in [
+                    Callback::Hash,
+                    Callback::Build,
+                    Callback::Write,
+                    Callback::Finish,
+                ] {
+                    let mut reached_success = false;
+                    for at in 1..=256 {
+                        let gate = Rc::new(Gate::default());
+                        let mut map = $map::with_capacity_and_hasher(128, Builder(gate.clone()));
+                        for id in 0..40 {
+                            map.insert(bomb(id, &gate), bomb(($value)(id), &gate));
+                        }
+                        for id in (0..40).step_by(3) {
+                            map.remove(&id);
+                        }
+                        let before: Vec<_> = map.iter().map(|(k, v)| (k.id, v.id)).collect();
+                        let reverse_before = ($check_reverse)(&map);
+                        gate.arm(kind, at);
+                        let outcome = catch_unwind(AssertUnwindSafe(|| match operation {
+                            "reserve" => map.reserve(200),
+                            "try_reserve" => map.try_reserve(200).unwrap(),
+                            "shrink" => map.shrink_to_fit(),
+                            _ => unreachable!(),
+                        }));
+                        gate.disarm();
+                        assert_eq!(
+                            map.iter().map(|(k, v)| (k.id, v.id)).collect::<Vec<_>>(),
+                            before
+                        );
+                        assert_eq!(($check_reverse)(&map), reverse_before);
+                        for (key, value) in &before {
+                            assert_eq!(map.get(key).map(|v| v.id), Some(*value));
+                        }
+                        // Verify the map remains usable after success or unwinding.
+                        map.insert(bomb(200, &gate), bomb(200, &gate));
+                        assert_eq!(map.remove(&200).map(|v| v.id), Some(200));
+                        if outcome.is_ok() {
+                            reached_success = true;
+                            break;
+                        }
+                    }
+                    assert!(reached_success, "{operation}: {kind:?} never succeeded");
+                }
+            }
+        }
+    };
+}
+capacity_panics!(
+    surmap_capacity_panics_preserve_mappings_and_groups,
+    SurMap,
+    |id| id % 4,
+    |map: &SurMap<Bomb, Bomb, Builder>| (0..4)
+        .map(|v| {
+            map.get_keys(&v)
+                .take(map.len() + 1)
+                .map(|k| k.id)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+);
+capacity_panics!(
+    bimap_capacity_panics_preserve_both_indexes,
+    BiMap,
+    |id| id + 100,
+    |map: &BiMap<Bomb, Bomb, Builder>| (100..140)
+        .map(|v| map.get_key(&v).map(|k| k.id))
+        .collect::<Vec<_>>()
+);

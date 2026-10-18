@@ -6,10 +6,27 @@ use crate::bidi_table::{BidiTable, TableEntry};
 
 use crate::{Drain, Equivalent, Iter, SurMapKeysIter, TryReserveError};
 
-/// A Surjective HashMap.
+/// A surjective hash map.
 ///
-/// Key -> Value
-/// Value -> [Key]
+/// Each key maps to one value; [`get_keys`](Self::get_keys) returns all keys
+/// with an equal value. Each pair is owned once, without a `Clone` requirement
+/// for insertion or removal.
+///
+/// Queries may use borrowed types implementing [`Equivalent`], provided their
+/// hashes match those of the stored keys or values they match.
+///
+/// Values are owned per mapping. Shared values can use [`std::rc::Rc`]:
+///
+/// ```
+/// use std::rc::Rc;
+/// use surmap::SurMap;
+/// let team: Rc<str> = Rc::from("engineering");
+/// let mut map = SurMap::new();
+/// map.insert(String::from("alice"), Rc::clone(&team));
+/// map.insert(String::from("bob"), Rc::clone(&team));
+/// assert!(Rc::ptr_eq(map.get("alice").unwrap(), map.get("bob").unwrap()));
+/// assert_eq!(map.get_keys("engineering").count(), 2);
+/// ```
 #[derive(Clone)]
 pub struct SurMap<K, V, S = DefaultHashBuilder> {
     table: BidiTable<Entry<K, V>, S>,
@@ -22,46 +39,55 @@ impl<K, V, S: Default> Default for SurMap<K, V, S> {
 }
 
 impl<K, V> SurMap<K, V> {
+    /// Creates an empty map with the default hash builder, without allocating.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Creates an empty map with space for at least `capacity` mappings and values.
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_capacity_and_hasher(capacity, DefaultHashBuilder::default())
     }
 }
 
 impl<K, V, S> SurMap<K, V, S> {
+    /// Creates an empty map with the supplied hash builder, without allocating.
     pub fn with_hasher(hash_builder: S) -> Self {
         Self::with_capacity_and_hasher(0, hash_builder)
     }
 
+    /// Creates a map with the supplied hasher and room for `capacity` mappings
+    /// and distinct values.
     pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> Self {
         Self {
             table: BidiTable::with_capacity_and_hasher(capacity, hash_builder),
         }
     }
 
+    /// Returns the hash builder used by both indexes.
     pub fn hasher(&self) -> &S {
         self.table.hasher()
     }
 
+    /// Returns the number of mappings.
     pub fn len(&self) -> usize {
         self.table.len()
     }
 
+    /// Returns whether the map contains no mappings.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Number of distinct values, which may be smaller than `len()`.
+    /// Returns the number of distinct values, which may be smaller than [`len`](Self::len).
     pub fn value_len(&self) -> usize {
         self.table.value_len()
     }
 
     /// Capacity of the entry vector and key index. New distinct values may
-    /// separately grow the value index; see `value_capacity`.
+    /// separately grow the value index; see [`value_capacity`](Self::value_capacity).
     pub fn capacity(&self) -> usize {
         self.table.capacity()
     }
@@ -76,18 +102,19 @@ impl<K, V, S> SurMap<K, V, S> {
         self.table.clear();
     }
 
-    /// Iteration follows vector order, which can change after removals.
+    /// Iterates over key/value references in storage order. Removal may reorder entries.
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter::from_surmap(self.table.entries().iter())
     }
 
+    /// Iterates over key references in [`iter`](Self::iter) order.
     pub fn keys(
         &self,
     ) -> impl ExactSizeIterator<Item = &K> + DoubleEndedIterator + std::iter::FusedIterator {
         self.iter().map(|(k, _)| k)
     }
 
-    /// Yields one value per mapping, including equal values.
+    /// Iterates over value references in [`iter`](Self::iter) order, including duplicates.
     pub fn values(
         &self,
     ) -> impl ExactSizeIterator<Item = &V> + DoubleEndedIterator + std::iter::FusedIterator {
@@ -107,12 +134,18 @@ impl<K, V, S> SurMap<K, V, S> {
         Drain::from_surmap(self.table.drain())
     }
 
+    /// Consumes the map and yields keys in storage order.
+    /// Each value is dropped when its key is yielded. Dropping the iterator
+    /// drops all remaining pairs.
     pub fn into_keys(
         self,
     ) -> impl ExactSizeIterator<Item = K> + DoubleEndedIterator + std::iter::FusedIterator {
         self.into_iter().map(|(k, _)| k)
     }
 
+    /// Consumes the map and yields one value per mapping in storage order,
+    /// including duplicates. Each key is dropped when its value is yielded.
+    /// Dropping the iterator drops all remaining pairs.
     pub fn into_values(
         self,
     ) -> impl ExactSizeIterator<Item = V> + DoubleEndedIterator + std::iter::FusedIterator {
@@ -161,7 +194,11 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         self.table.reserve(additional);
     }
 
-    /// On failure mappings are unchanged, but some storage may have grown.
+    /// Fallible version of [`reserve`](Self::reserve).
+    ///
+    /// # Errors
+    /// Returns an error on capacity overflow or allocation failure. Mappings
+    /// are unchanged, but some allocations may already have grown.
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
         self.table.try_reserve(additional)
     }
@@ -176,20 +213,25 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         self.table.shrink_to(min_capacity);
     }
 
+    /// Returns whether a mapping with an equivalent key exists.
     pub fn contains_key<Q: Hash + Equivalent<K> + ?Sized>(&self, key: &Q) -> bool {
         self.get(key).is_some()
     }
 
+    /// Returns whether at least one mapping has an equivalent value.
     pub fn contains_value<Q: Hash + Equivalent<V> + ?Sized>(&self, value: &Q) -> bool {
         self.value_index(value).is_some()
     }
 
+    /// Returns references to the stored key and its value, or `None` if absent.
     pub fn get_key_value<Q: Hash + Equivalent<K> + ?Sized>(&self, key: &Q) -> Option<(&K, &V)> {
         self.get_inner(key).map(|(k, v)| (k, v))
     }
 
-    /// Tests each mapping once with a shared key and value reference.
-    /// Retained value groups keep their order; overall storage order may change.
+    /// Keeps mappings for which `f(&key, &value)` returns `true`.
+    /// Each mapping is visited once, in unspecified order. Retained groups keep
+    /// their relative key order. If `f` panics, completed removals remain in
+    /// effect and the map remains usable.
     pub fn retain(&mut self, mut f: impl FnMut(&K, &V) -> bool) {
         let mut index = 0;
         while index < self.len() {
@@ -206,8 +248,23 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         self.table.value_index(value)
     }
 
-    /// Hashing and equality finish before changing mappings or value groups.
-    /// On a hash/equality panic, mappings and group order are unchanged.
+    /// Inserts a mapping, returning the previous value for an equal key, if any.
+    ///
+    /// New keys are linked at the head of the value's group. Reassigning a key
+    /// to a different value replaces the stored key and moves it to the head
+    /// of the new group. If the new value equals the old one, the stored key
+    /// and group position are retained. The supplied value is stored in both cases.
+    ///
+    /// A panic in hashing or equality leaves mappings and group order unchanged.
+    /// Capacity may increase during preparation.
+    ///
+    /// ```
+    /// use surmap::SurMap;
+    /// let mut map = SurMap::from([("a", 1), ("b", 1), ("c", 2)]);
+    /// assert_eq!(map.insert("a", 2), Some(1));
+    /// assert_eq!(map.get_keys(&1).copied().collect::<Vec<_>>(), ["b"]);
+    /// assert_eq!(map.get_keys(&2).copied().collect::<Vec<_>>(), ["a", "c"]);
+    /// ```
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let new_entry = Entry::from((key, value));
         let prepared = self.table.prepare_insert(&new_entry.pair);
@@ -246,6 +303,8 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         }
     }
 
+    /// Removes the mapping for `k`, returning its value or `None` if absent.
+    /// Other keys in the value group keep their relative order.
     pub fn remove<Q>(&mut self, k: &Q) -> Option<V>
     where
         Q: Hash + Equivalent<K> + ?Sized,
@@ -258,6 +317,8 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         }
     }
 
+    /// Removes the mapping for `k`, returning the owned stored pair or `None`.
+    /// Other keys in the value group keep their relative order.
     pub fn remove_entry<Q>(&mut self, k: &Q) -> Option<(K, V)>
     where
         Q: Hash + Equivalent<K> + ?Sized,
@@ -282,6 +343,7 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         entry.pair
     }
 
+    /// Returns the value associated with `k`, or `None` if absent.
     #[inline]
     pub fn get<Q>(&self, k: &Q) -> Option<&V>
     where
@@ -304,6 +366,18 @@ impl<K: Hash + Eq, V: Hash + Eq, S: BuildHasher> SurMap<K, V, S> {
         Some(&self.table.entries()[index].pair)
     }
 
+    /// Iterates over all keys with a value equivalent to `v`.
+    ///
+    /// The most recently linked key is visited first. An absent value produces
+    /// an empty iterator. Constructing the iterator takes expected O(1) time;
+    /// advancing it takes O(1) time per key.
+    ///
+    /// ```
+    /// use surmap::SurMap;
+    /// let map = SurMap::from([("alice", "team"), ("bob", "team")]);
+    /// assert_eq!(map.get_keys("team").copied().collect::<Vec<_>>(), ["bob", "alice"]);
+    /// assert_eq!(map.get_keys("missing").next(), None);
+    /// ```
     #[inline]
     pub fn get_keys<Q>(&self, v: &Q) -> SurMapKeysIter<'_, K, V, S>
     where

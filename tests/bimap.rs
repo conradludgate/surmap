@@ -48,7 +48,9 @@ fn check_bijection<S: BuildHasher + Default>() {
     let mut expected = BTreeMap::new();
     let mut state = 123_u64;
     for step in 0..2000 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let key = ((state >> 32) % 32) as u32;
         let value = ((state >> 40) % 32) as u32;
         match state & 3 {
@@ -215,11 +217,9 @@ fn retain_panic_leaves_both_bijective_indexes_consistent() {
     let result = catch_unwind(AssertUnwindSafe(|| {
         map.retain(|_, _| {
             calls += 1;
-            if calls == 5 {
-                panic!("predicate failed");
-            }
+            assert!(calls != 5, "predicate failed");
             false
-        })
+        });
     }));
     assert!(result.is_err());
     assert_eq!(map.len(), 26);

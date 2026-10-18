@@ -3,7 +3,9 @@ use crate::surmap::Entry;
 use crate::SurMap;
 use std::iter::FusedIterator;
 
-/// Shared iteration over mappings in storage order.
+/// Key/value references in storage order, from [`SurMap::iter`] or [`crate::BiMap::iter`].
+///
+/// Supports iteration from either end and reports the exact number of pairs remaining.
 pub struct Iter<'a, K, V> {
     inner: IterInner<'a, K, V>,
 }
@@ -61,7 +63,10 @@ impl<K, V> DoubleEndedIterator for Iter<'_, K, V> {
 impl<K, V> ExactSizeIterator for Iter<'_, K, V> {}
 impl<K, V> FusedIterator for Iter<'_, K, V> {}
 
-/// Owning iteration over mappings.
+/// Owned pairs in storage order, from [`IntoIterator::into_iter`].
+///
+/// Dropping the iterator drops unconsumed pairs. Pairs already yielded belong
+/// to the caller and are unaffected.
 pub struct IntoIter<K, V> {
     inner: IntoIterInner<K, V>,
 }
@@ -110,7 +115,10 @@ impl<K, V> DoubleEndedIterator for IntoIter<K, V> {
 impl<K, V> ExactSizeIterator for IntoIter<K, V> {}
 impl<K, V> FusedIterator for IntoIter<K, V> {}
 
-/// Draining iteration over owned mappings.
+/// Owned pairs removed by [`SurMap::drain`] or [`crate::BiMap::drain`].
+///
+/// Pairs are yielded in storage order. Dropping the iterator drops unconsumed
+/// pairs and leaves the map empty, with its allocations retained.
 pub struct Drain<'a, K, V> {
     inner: DrainInner<'a, K, V>,
 }
@@ -133,7 +141,7 @@ impl<'a, K, V> Drain<'a, K, V> {
     }
 }
 
-impl<'a, K, V> Iterator for Drain<'a, K, V> {
+impl<K, V> Iterator for Drain<'_, K, V> {
     type Item = (K, V);
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
@@ -168,6 +176,8 @@ impl<'a, K, V, S> IntoIterator for &'a SurMap<K, V, S> {
 }
 
 /// Iterates over the keys in one value group, newest first.
+///
+/// Created by [`SurMap::get_keys`]. Each step takes O(1) time.
 pub struct SurMapKeysIter<'a, K, V, S> {
     pub(crate) map: &'a SurMap<K, V, S>,
     pub(crate) entry: usize,

@@ -8,6 +8,7 @@ edition = "2021"
 rust-version = "1.85"
 readme = "README.md"
 repository = "https://github.com/conradludgate/surmap"
+documentation = "https://docs.rs/surmap"
 keywords = ["map", "hashmap", "bimap", "surjective", "bidirectional"]
 categories = ["data-structures"]
 
@@ -19,5 +20,20 @@ serde_core = { version = "1.0", optional = true }
 default = []
 serde = ["dep:serde_core"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dev-dependencies]
 serde_json = "1.0"
+bimap = "0.6.3"
+multi_bimap = "0.8.0"
+foldhash = "0.2.0"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "maps"
+harness = false
+
+[[bench]]
+name = "strings"
+harness = false
